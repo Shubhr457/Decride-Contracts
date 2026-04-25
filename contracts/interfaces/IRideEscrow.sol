@@ -17,4 +17,6 @@ interface IRideEscrow {
             bool riderConfirmed,
             bool driverConfirmed
         );
+
+    function resolveDispute(uint256 rideId, uint256 driverAmount, uint256 riderAmount) external;
 }
