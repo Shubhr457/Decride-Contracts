@@ -1,0 +1,20 @@
+{
+  "name": "decride-contracts",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shubhr457/Decride-Contracts.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Shubhr457/Decride-Contracts/issues"
+  },
+  "homepage": "https://github.com/Shubhr457/Decride-Contracts#readme",
+  "description": ""
+}
