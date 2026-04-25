@@ -1,20 +1,24 @@
 {
   "name": "decride-contracts",
-  "version": "1.0.0",
-  "main": "index.js",
+  "version": "0.1.0",
+  "description": "Smart contracts for the Decride decentralized ride-sharing platform.",
+  "license": "MIT",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "hardhat compile",
+    "clean": "hardhat clean",
+    "test": "hardhat test",
+    "coverage": "hardhat coverage"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Shubhr457/Decride-Contracts.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/Shubhr457/Decride-Contracts/issues"
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.19",
+    "solidity-coverage": "^0.8.14"
   },
-  "homepage": "https://github.com/Shubhr457/Decride-Contracts#readme",
-  "description": ""
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.2.0"
+  }
 }
