@@ -443,8 +443,9 @@ contract DisputeResolution is Ownable, ReentrancyGuard {
             return (VoteChoice.Rider, 0, fareAmount);
         }
 
-        // split wins strictly (s > d and s > r)
-        uint256 splitDriverAmount = fareAmount / 2;
+        // split wins strictly (s > d and s > r). The odd wei goes to the driver
+        // because platform fees are charged against the driver's settlement side.
+        uint256 splitDriverAmount = (fareAmount / 2) + (fareAmount % 2);
         return (VoteChoice.Split, splitDriverAmount, fareAmount - splitDriverAmount);
     }
 
@@ -469,15 +470,22 @@ contract DisputeResolution is Ownable, ReentrancyGuard {
         }
         if (winnerCount == 0) return;
 
-        uint256 perJuror = reward / winnerCount;
-        uint256 total = perJuror * winnerCount;
-        if (rewardReserve < total) return; // insufficient reserve, skip silently
+        if (rewardReserve < reward) return; // insufficient reserve, skip silently
 
-        rewardReserve -= total;
+        uint256 perJuror = reward / winnerCount;
+        uint256 remainder = reward % winnerCount;
+        rewardReserve -= reward;
         for (uint256 i = 0; i < jury.length; i++) {
             if (votes[caseId][jury[i]] == winner) {
-                rideToken.safeTransfer(jury[i], perJuror);
-                emit JurorRewarded(caseId, jury[i], perJuror);
+                uint256 payout = perJuror;
+                if (remainder > 0) {
+                    payout += 1;
+                    remainder -= 1;
+                }
+                if (payout > 0) {
+                    rideToken.safeTransfer(jury[i], payout);
+                    emit JurorRewarded(caseId, jury[i], payout);
+                }
             }
         }
     }

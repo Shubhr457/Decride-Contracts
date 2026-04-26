@@ -60,7 +60,7 @@ describe("DisputeResolution", function () {
     await escrow.connect(driver).startRide(1);
     await escrow.connect(rider).disputeRide(1, evidenceHash);
 
-    return { token, escrow, dispute, oracle, treasury, rider, driver, arb1, arb2, arb3, outsider };
+    return { token, escrow, dispute, oracle, treasury, matcher, rider, driver, arb1, arb2, arb3, outsider };
   }
 
   // ── Existing coverage (admin openCase path) ───────────────────────────────
@@ -257,6 +257,32 @@ describe("DisputeResolution", function () {
     expect(await dispute.rewardReserve()).to.equal(0n);
   });
 
+  it("distributes the full juror reward when it is not evenly divisible", async function () {
+    const reward = 10n;
+    const { token, dispute, treasury, arb1, arb2, arb3 } = await deployFixture({ jurorReward: reward });
+
+    await token.connect(treasury).approve(dispute.target, reward);
+    await dispute.connect(treasury).fundRewardReserve(reward);
+    await dispute.openCase(1, [arb1.address, arb2.address, arb3.address]);
+
+    await dispute.connect(arb1).vote(1, 1);
+    await dispute.connect(arb2).vote(1, 1);
+    await dispute.connect(arb3).vote(1, 1);
+
+    await time.increase(VOTING_PERIOD);
+
+    const arb1Before = await token.balanceOf(arb1.address);
+    const arb2Before = await token.balanceOf(arb2.address);
+    const arb3Before = await token.balanceOf(arb3.address);
+
+    await dispute.executeCase(1);
+
+    expect(await token.balanceOf(arb1.address)).to.equal(arb1Before + 4n);
+    expect(await token.balanceOf(arb2.address)).to.equal(arb2Before + 3n);
+    expect(await token.balanceOf(arb3.address)).to.equal(arb3Before + 3n);
+    expect(await dispute.rewardReserve()).to.equal(0n);
+  });
+
   it("skips rewards silently if reserve is insufficient", async function () {
     const { dispute, arb1, arb2, arb3 } = await deployFixture({ jurorReward: JUROR_REWARD });
     // No funds in reserve → rewardReserve = 0
@@ -348,6 +374,32 @@ describe("DisputeResolution", function () {
     );
     expect(await token.balanceOf(rider.address)).to.equal(riderBefore + riderHalf);
     expect((await escrow.rides(1)).status).to.equal(4);
+  });
+
+  it("assigns the odd wei to the driver when a split outcome resolves an odd fare", async function () {
+    const { token, escrow, dispute, matcher, rider, driver, arb1, arb2, arb3 } = await deployFixture();
+    const oddFare = 1001n;
+
+    await escrow.setPlatformFee(0);
+    await escrow.connect(rider).requestRide(token.target, oddFare, metadataHash);
+    await escrow.connect(matcher).matchRide(2, driver.address);
+    await escrow.connect(driver).startRide(2);
+    await escrow.connect(rider).disputeRide(2, evidenceHash);
+
+    await dispute.openCase(2, [arb1.address, arb2.address, arb3.address]);
+    await dispute.connect(arb1).vote(1, 3);
+    await dispute.connect(arb2).vote(1, 3);
+    await dispute.connect(arb3).vote(1, 1);
+
+    await time.increase(VOTING_PERIOD);
+
+    const driverBefore = await token.balanceOf(driver.address);
+    const riderBefore = await token.balanceOf(rider.address);
+
+    await dispute.executeCase(1);
+
+    expect(await token.balanceOf(driver.address)).to.equal(driverBefore + 501n);
+    expect(await token.balanceOf(rider.address)).to.equal(riderBefore + 500n);
   });
 
   it("driver wins a three-way tie (tie-break: driver > rider > split)", async function () {
