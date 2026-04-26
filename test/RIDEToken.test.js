@@ -29,9 +29,7 @@ describe("RIDEToken", function () {
       .withArgs(limit + 1n, limit);
 
     await expect(token.connect(alice).transfer(bob.address, limit)).to.changeTokenBalances(
-      token,
-      [alice, bob],
-      [-limit, limit]
+      token, [alice, bob], [-limit, limit]
     );
   });
 
@@ -43,9 +41,7 @@ describe("RIDEToken", function () {
     await token.connect(treasury).setTransferLimitExempt(alice.address, true);
 
     await expect(token.connect(alice).transfer(bob.address, amount)).to.changeTokenBalances(
-      token,
-      [alice, bob],
-      [-amount, amount]
+      token, [alice, bob], [-amount, amount]
     );
 
     await token.connect(treasury).setTransferLimit(0, false);
@@ -60,5 +56,59 @@ describe("RIDEToken", function () {
     await token.connect(alice).delegate(alice.address);
 
     expect(await token.getVotes(alice.address)).to.equal(amount);
+  });
+
+  it("vesting wallets and operational contracts can be exempted", async function () {
+    const { token, treasury, alice, bob } = await deployTokenFixture();
+    const amount = ethers.parseEther("30000000"); // > 2% limit
+
+    // Simulate vesting wallet: exempt the "wallet" address
+    await token.connect(treasury).setTransferLimitExempt(alice.address, true);
+    await token.connect(treasury).transfer(alice.address, amount);
+
+    // Wallet releases tokens to beneficiary (bob is not exempt, amount stays below limit)
+    const smallRelease = ethers.parseEther("1000");
+    await expect(token.connect(alice).transfer(bob.address, smallRelease)).not.to.be.reverted;
+  });
+
+  it("setTransferLimit rejects limit above BPS_DENOMINATOR", async function () {
+    const { token, treasury } = await deployTokenFixture();
+    await expect(
+      token.connect(treasury).setTransferLimit(10_001, true)
+    ).to.be.revertedWithCustomError(token, "TransferLimitTooHigh");
+  });
+
+  it("nonces returns the expected permit nonce for an account", async function () {
+    const { token, alice } = await deployTokenFixture();
+    expect(await token.nonces(alice.address)).to.equal(0);
+  });
+
+  it("transfer to an exempt recipient bypasses the limit check regardless of amount", async function () {
+    const { token, treasury, alice, bob } = await deployTokenFixture();
+    const overLimit = await token.maxTransferAmount() + 1n;
+
+    // Make bob exempt (simulates receiving vesting wallet)
+    await token.connect(treasury).setTransferLimitExempt(bob.address, true);
+    // Give alice a large balance (via treasury which is already exempt)
+    await token.connect(treasury).transfer(alice.address, overLimit);
+
+    // alice → bob (over limit); alice not exempt, but bob is exempt → limit bypassed
+    await expect(token.connect(alice).transfer(bob.address, overLimit)).not.to.be.reverted;
+  });
+
+  // ── Non-owner access control ───────────────────────────────────────────────
+
+  it("setTransferLimit reverts for non-owner caller", async function () {
+    const { token, alice } = await deployTokenFixture();
+    await expect(
+      token.connect(alice).setTransferLimit(100, true)
+    ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
+  });
+
+  it("setTransferLimitExempt reverts for non-owner caller", async function () {
+    const { token, alice, bob } = await deployTokenFixture();
+    await expect(
+      token.connect(alice).setTransferLimitExempt(bob.address, true)
+    ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
   });
 });

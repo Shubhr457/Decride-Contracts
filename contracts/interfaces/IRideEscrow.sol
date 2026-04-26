@@ -19,4 +19,12 @@ interface IRideEscrow {
         );
 
     function resolveDispute(uint256 rideId, uint256 driverAmount, uint256 riderAmount) external;
+
+    function MAX_PLATFORM_FEE_BPS() external view returns (uint16);
+
+    function platformFeeBps() external view returns (uint16);
+
+    function requestTimeout() external view returns (uint64);
+
+    function rideTimeout() external view returns (uint64);
 }

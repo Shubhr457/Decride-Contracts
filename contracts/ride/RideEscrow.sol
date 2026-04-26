@@ -9,6 +9,7 @@ import {IDriverStaking} from "../interfaces/IDriverStaking.sol";
 
 /// @title Ride escrow and lifecycle state machine for Decride.
 /// @notice Keeps payment-critical ride state on-chain while route and evidence data remain off-chain.
+/// @notice Platform commission is hard-capped at 10% (MAX_PLATFORM_FEE_BPS) per the SOW.
 contract RideEscrow is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -37,13 +38,18 @@ contract RideEscrow is Ownable, ReentrancyGuard {
     }
 
     uint16 public constant BPS_DENOMINATOR = 10_000;
+    /// @notice SOW hard cap: platform commission must never exceed 10%.
+    uint16 public constant MAX_PLATFORM_FEE_BPS = 1_000;
 
     IDriverStaking public driverStaking;
     address public treasury;
     address public matcher;
     address public disputeResolver;
     uint16 public platformFeeBps;
+    /// @notice Timeout for unmatched Requested rides (funds auto-refunded after this period).
     uint64 public requestTimeout;
+    /// @notice Timeout for stuck Matched or Active rides after which either party can trigger a refund.
+    uint64 public rideTimeout;
     uint256 public nextRideId = 1;
 
     mapping(uint256 rideId => Ride ride) public rides;
@@ -68,6 +74,7 @@ contract RideEscrow is Ownable, ReentrancyGuard {
     event TreasuryUpdated(address indexed treasury);
     event PlatformFeeUpdated(uint16 platformFeeBps);
     event RequestTimeoutUpdated(uint64 requestTimeout);
+    event RideTimeoutUpdated(uint64 rideTimeout);
 
     error ZeroAddress();
     error ZeroAmount();
@@ -75,9 +82,11 @@ contract RideEscrow is Ownable, ReentrancyGuard {
     error RideNotFound();
     error InvalidRideStatus(RideStatus current);
     error NotMatcher();
+    error NotDisputeResolver();
     error NotRideParticipant();
     error DriverNotActive();
     error RequestStillActive(uint64 refundableAt);
+    error RideStillActive(uint64 refundableAt);
     error InvalidDisputeSplit();
 
     constructor(
@@ -86,7 +95,8 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         address matcher_,
         address disputeResolver_,
         uint16 platformFeeBps_,
-        uint64 requestTimeout_
+        uint64 requestTimeout_,
+        uint64 rideTimeout_
     ) Ownable(msg.sender) {
         if (
             address(driverStaking_) == address(0) || treasury_ == address(0) || matcher_ == address(0)
@@ -94,7 +104,7 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         ) {
             revert ZeroAddress();
         }
-        if (platformFeeBps_ > BPS_DENOMINATOR) {
+        if (platformFeeBps_ > MAX_PLATFORM_FEE_BPS) {
             revert FeeTooHigh();
         }
 
@@ -104,8 +114,10 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         disputeResolver = disputeResolver_;
         platformFeeBps = platformFeeBps_;
         requestTimeout = requestTimeout_;
+        rideTimeout = rideTimeout_;
     }
 
+    /// @notice Rider creates a ride request, escrowing the full fare amount.
     function requestRide(IERC20 paymentToken, uint256 fareAmount, bytes32 metadataHash)
         external
         nonReentrant
@@ -136,6 +148,7 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         emit RideRequested(rideId, msg.sender, address(paymentToken), fareAmount, metadataHash);
     }
 
+    /// @notice Off-chain matcher assigns an active driver to a requested ride.
     function matchRide(uint256 rideId, address driver) external {
         if (msg.sender != matcher) {
             revert NotMatcher();
@@ -154,6 +167,7 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         emit RideMatched(rideId, driver);
     }
 
+    /// @notice Either participant transitions the ride from Matched to Active.
     function startRide(uint256 rideId) external {
         Ride storage ride = _ride(rideId);
         _requireStatus(ride, RideStatus.Matched);
@@ -163,6 +177,7 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         emit RideStarted(rideId);
     }
 
+    /// @notice Both participants must confirm completion; second confirmation settles the fare.
     function confirmCompletion(uint256 rideId) external nonReentrant {
         Ride storage ride = _ride(rideId);
         _requireStatus(ride, RideStatus.Active);
@@ -181,6 +196,7 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         }
     }
 
+    /// @notice Either participant opens a dispute, sending the ride to the arbitration contract.
     function disputeRide(uint256 rideId, bytes32 evidenceHash) external {
         Ride storage ride = _ride(rideId);
         if (ride.status != RideStatus.Matched && ride.status != RideStatus.Active) {
@@ -192,9 +208,10 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         emit RideDisputed(rideId, msg.sender, evidenceHash);
     }
 
+    /// @notice Called by DisputeResolution to distribute escrowed funds after a jury verdict.
     function resolveDispute(uint256 rideId, uint256 driverAmount, uint256 riderAmount) external nonReentrant {
         if (msg.sender != disputeResolver) {
-            revert NotMatcher();
+            revert NotDisputeResolver();
         }
 
         Ride storage ride = _ride(rideId);
@@ -207,6 +224,7 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         _settleRide(rideId, ride, driverAmount, riderAmount);
     }
 
+    /// @notice Refunds a Requested ride that was never matched within requestTimeout.
     function refundExpiredRequest(uint256 rideId) external nonReentrant {
         Ride storage ride = _ride(rideId);
         _requireStatus(ride, RideStatus.Requested);
@@ -222,6 +240,28 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         emit RideRefunded(rideId, ride.fareAmount);
     }
 
+    /// @notice Refunds a Matched or Active ride that has been stuck past rideTimeout.
+    /// @dev Either participant can trigger this so funds are never permanently trapped.
+    function refundStuckRide(uint256 rideId) external nonReentrant {
+        Ride storage ride = _ride(rideId);
+        if (ride.status != RideStatus.Matched && ride.status != RideStatus.Active) {
+            revert InvalidRideStatus(ride.status);
+        }
+        _requireParticipant(ride);
+
+        uint64 startedAt = ride.matchedAt;
+        uint64 refundableAt = startedAt + rideTimeout;
+        if (block.timestamp < refundableAt) {
+            revert RideStillActive(refundableAt);
+        }
+
+        ride.status = RideStatus.Refunded;
+        ride.paymentToken.safeTransfer(ride.rider, ride.fareAmount);
+
+        emit RideRefunded(rideId, ride.fareAmount);
+    }
+
+    /// @notice Rider cancels an unmatched ride request and receives a full refund.
     function cancelRequest(uint256 rideId) external nonReentrant {
         Ride storage ride = _ride(rideId);
         _requireStatus(ride, RideStatus.Requested);
@@ -239,7 +279,6 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         if (matcher_ == address(0)) {
             revert ZeroAddress();
         }
-
         matcher = matcher_;
         emit MatcherUpdated(matcher_);
     }
@@ -248,7 +287,6 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         if (disputeResolver_ == address(0)) {
             revert ZeroAddress();
         }
-
         disputeResolver = disputeResolver_;
         emit DisputeResolverUpdated(disputeResolver_);
     }
@@ -257,16 +295,15 @@ contract RideEscrow is Ownable, ReentrancyGuard {
         if (treasury_ == address(0)) {
             revert ZeroAddress();
         }
-
         treasury = treasury_;
         emit TreasuryUpdated(treasury_);
     }
 
+    /// @notice Updates platform fee. Cannot exceed MAX_PLATFORM_FEE_BPS (10%).
     function setPlatformFee(uint16 platformFeeBps_) external onlyOwner {
-        if (platformFeeBps_ > BPS_DENOMINATOR) {
+        if (platformFeeBps_ > MAX_PLATFORM_FEE_BPS) {
             revert FeeTooHigh();
         }
-
         platformFeeBps = platformFeeBps_;
         emit PlatformFeeUpdated(platformFeeBps_);
     }
@@ -274,6 +311,11 @@ contract RideEscrow is Ownable, ReentrancyGuard {
     function setRequestTimeout(uint64 requestTimeout_) external onlyOwner {
         requestTimeout = requestTimeout_;
         emit RequestTimeoutUpdated(requestTimeout_);
+    }
+
+    function setRideTimeout(uint64 rideTimeout_) external onlyOwner {
+        rideTimeout = rideTimeout_;
+        emit RideTimeoutUpdated(rideTimeout_);
     }
 
     function _settleRide(uint256 rideId, Ride storage ride, uint256 driverAmount, uint256 riderAmount) internal {

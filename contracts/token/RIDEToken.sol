@@ -29,10 +29,7 @@ contract RIDEToken is ERC20, ERC20Permit, ERC20Votes, Ownable {
         ERC20Permit("Decride Ride Token")
         Ownable(treasury)
     {
-        if (treasury == address(0)) {
-            revert ERC20InvalidReceiver(address(0));
-        }
-
+        // OZ Ownable(treasury) already reverts for address(0); no custom check needed.
         maxTransferBps = 200;
         isTransferLimitExempt[treasury] = true;
         isTransferLimitExempt[address(0)] = true;
